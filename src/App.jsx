@@ -210,6 +210,7 @@ const TeamLogo = ({ abbr, size = 36 }) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 const LoginPage = ({ onSwitch, onLogin }) => {
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -221,7 +222,7 @@ const LoginPage = ({ onSwitch, onLogin }) => {
     try {
       const data = await api("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, username, password }),
       });
       localStorage.setItem("token", data.token);
       localStorage.setItem("user", JSON.stringify(data.user));
@@ -241,7 +242,9 @@ const LoginPage = ({ onSwitch, onLogin }) => {
         {error && <div style={{ background: "#2a0a0a", color: "#ff6b6b", padding: 10, borderRadius: 8, marginBottom: 16, fontSize: 13 }}>{error}</div>}
         <form onSubmit={submit}>
           <label style={{ color: "#aaa", fontSize: 12, display: "block", marginBottom: 4 }}>Email</label>
-          <input value={email} onChange={(e) => setEmail(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }} required />
+          <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" style={{ ...inputStyle, marginBottom: 14 }} required />
+          <label style={{ color: "#aaa", fontSize: 12, display: "block", marginBottom: 4 }}>Username</label>
+          <input value={username} onChange={(e) => setUsername(e.target.value)} style={{ ...inputStyle, marginBottom: 14 }} required />
           <label style={{ color: "#aaa", fontSize: 12, display: "block", marginBottom: 4 }}>Password</label>
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={{ ...inputStyle, marginBottom: 20 }} required />
           <button type="submit" disabled={loading} style={{ ...btnPrimary, width: "100%", padding: 12 }}>
