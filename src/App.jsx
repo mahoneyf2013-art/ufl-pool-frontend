@@ -18,7 +18,7 @@ function TmLogo({team,size}){
 
 function calcPayout(w,odds){if(!w||w<=0)return 0;const o=odds==null?-110:typeof odds==="string"?parseInt(odds):odds;return o<0?Math.round(w*(100/Math.abs(o))):Math.round(w*(o/100));}
 function fmtOdds(odds){if(odds==null)return"-110";const o=typeof odds==="string"?parseInt(odds):odds;return o>0?"+"+o:""+o;}
-function calcParlayPayout(legs,w){if(!w||w<=0||legs.length<2)return 0;let m=1;for(const l of legs){if(l.betType==="moneyline"&&l.odds!=null){const o=typeof l.odds==="string"?parseInt(l.odds):l.odds;m*=o<0?1+100/Math.abs(o):1+o/100;}else m*=1.909;}return Math.round(w*m)-w;}
+function calcParlayPayout(legs,w){if(!w||w<=0||legs.length<2)return 0;let m=1;for(const l of legs){const rawOdds=l.odds||(l.betType==="moneyline"?l.odds:null);const o=rawOdds!=null?(typeof rawOdds==="string"?parseInt(rawOdds):rawOdds):-110;m*=o<0?1+100/Math.abs(o):1+o/100;}return Math.round(w*m)-w;}
 function getToken(){try{return localStorage.getItem("ufl_token");}catch(e){return null;}}
 function setToken(t){try{localStorage.setItem("ufl_token",t);}catch(e){}}
 function removeToken(){try{localStorage.removeItem("ufl_token");}catch(e){}}
@@ -191,16 +191,19 @@ function LineHistoryPanel({data}){
 function ParlayBetCard({parlay,tm,betDesc,allGames,showUser}){
   var col=parlay.result==="win"?C.green:parlay.result==="loss"?C.red:C.blue;
   var borderCol=parlay.result==="win"?C.green+"44":parlay.result==="loss"?C.red+"44":C.border;
-  var totalPayout=0;
-  if(parlay.result==="win"){
-    var m=1;
-    for(var i=0;i<parlay.legs.length;i++){
-      var l=parlay.legs[i];
-      var o=l.odds!=null?(typeof l.odds==="string"?parseInt(l.odds):l.odds):-110;
-      m*=o<0?1+100/Math.abs(o):1+o/100;
-    }
-    totalPayout=Math.round(parlay.wager*m);
+  // Calculate parlay multiplier from legs
+  var mt=1;
+  for(var i=0;i<parlay.legs.length;i++){
+    var l=parlay.legs[i];
+    var rawOdds=l.odds!=null?(typeof l.odds==="string"?parseInt(l.odds):l.odds):-110;
+    mt*=rawOdds<0?1+100/Math.abs(rawOdds):1+rawOdds/100;
   }
+  var totalPayout=Math.round(parlay.wager*mt);
+  var profit=totalPayout-parlay.wager;
+  // If backend already calculated payout, use that
+  var backendPayout=0;
+  for(var j=0;j<parlay.legs.length;j++){if(parlay.legs[j].payout>0)backendPayout=parlay.legs[j].payout;}
+  if(parlay.result==="win"&&backendPayout>0){totalPayout=backendPayout;profit=totalPayout-parlay.wager;}
   return (
     <Card style={{borderColor:borderCol}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
@@ -212,21 +215,22 @@ function ParlayBetCard({parlay,tm,betDesc,allGames,showUser}){
         <Badge text={parlay.result} color={parlay.result==="win"?C.green:parlay.result==="loss"?C.red:parlay.result==="push"?"#a3a3a3":C.blue}/>
       </div>
       {parlay.legs.map(function(leg,j){
-        /* Determine if this leg's game has kicked off */
         var gameKicked=leg.revealed||hasKickedOff(leg.commence_time);
-        /* Also check allGames for commence_time if not on the leg */
         if(!gameKicked&&allGames){
           var gm=allGames.find(function(g){return g.id===leg.game_id;});
           if(gm)gameKicked=hasKickedOff(gm.commence_time);
         }
         var legResult=leg.result||"pending";
         var legCol=legResult==="win"?C.green:legResult==="loss"?C.red:C.text;
+        var legOdds=leg.odds!=null?(typeof leg.odds==="string"?parseInt(leg.odds):leg.odds):-110;
+        var legOddsStr=legOdds>0?"+"+legOdds:""+legOdds;
         return (
           <div key={j} style={{fontSize:13,padding:"4px 0",borderBottom:j<parlay.legs.length-1?"1px solid "+C.border+"44":"none",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             {gameKicked ? (
               <span>
                 <span style={{color:C.dim}}>{tm(leg.away_team).abbr}@{tm(leg.home_team).abbr}: </span>
                 <strong style={{color:legCol}}>{betDesc(leg.bet_type,leg.pick,leg.line,leg.odds)}</strong>
+                <span style={{color:C.dim,fontSize:11}}> ({legOddsStr})</span>
               </span>
             ) : (
               <span style={{color:C.amber}}>🔒 Hidden until kickoff</span>
@@ -235,12 +239,18 @@ function ParlayBetCard({parlay,tm,betDesc,allGames,showUser}){
           </div>
         );
       })}
-      <div style={{marginTop:8,padding:"6px 10px",background:C.cardB,borderRadius:6,display:"flex",justifyContent:"space-between",fontSize:12}}>
-        <div><span style={{color:C.dim}}>Wager: </span><span style={{fontWeight:700}}>{parlay.wager}</span></div>
-        {parlay.result==="pending" && <div><span style={{color:C.dim}}>To win: </span><span style={{fontWeight:700,color:C.green}}>+{calcParlayPayout(parlay.legs.map(function(l){return{betType:l.bet_type,odds:l.odds};}),parlay.wager)}</span></div>}
-        {parlay.result==="win" && <div style={{color:C.green,fontWeight:700}}>+{totalPayout-parlay.wager}</div>}
-        {parlay.result==="loss" && <div style={{color:C.red,fontWeight:700}}>-{parlay.wager}</div>}
-        {parlay.result==="push" && <div style={{color:"#a3a3a3",fontWeight:700}}>Returned</div>}
+      <div style={{marginTop:8,padding:"8px 10px",background:C.cardB,borderRadius:6}}>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:4}}>
+          <div><span style={{color:C.dim}}>Wager: </span><span style={{fontWeight:700}}>{parlay.wager} pts</span></div>
+          <div><span style={{color:C.dim}}>Odds: </span><span style={{fontWeight:600}}>{mt.toFixed(2)}x</span></div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+          {parlay.result==="pending" && <div><span style={{color:C.dim}}>To win: </span><span style={{fontWeight:700,color:C.green}}>+{profit} pts</span></div>}
+          {parlay.result==="pending" && <div><span style={{color:C.dim}}>Payout: </span><span style={{fontWeight:700}}>{totalPayout} pts</span></div>}
+          {parlay.result==="win" && <div style={{color:C.green,fontWeight:700}}>Won +{profit} pts (Payout: {totalPayout})</div>}
+          {parlay.result==="loss" && <div style={{color:C.red,fontWeight:700}}>Lost {parlay.wager} pts</div>}
+          {parlay.result==="push" && <div style={{color:"#a3a3a3",fontWeight:700}}>Returned {parlay.wager} pts</div>}
+        </div>
       </div>
       <div style={{fontSize:11,color:C.muted,marginTop:4}}>{new Date(parlay.created_at).toLocaleString()}</div>
     </Card>
@@ -431,8 +441,9 @@ function AppInner(){
       var pg="parlay_"+Date.now();
       for(var i=0;i<parlayLegs.length;i++){
         var l=parlayLegs[i];
-        await api("/api/bet",{method:"POST",body:JSON.stringify({pool_id:activePool.id,game_id:l.gameId,bet_type:l.betType,pick:l.pick,line:l.line,odds:l.odds,wager:w,parlay_group:pg})});
+        await api("/api/bet",{method:"POST",body:JSON.stringify({pool_id:activePool.id,game_id:l.gameId,bet_type:l.betType,pick:l.pick,line:l.line,odds:l.odds,wager:w,parlay_group:pg,parlay_leg_index:i})});
       }
+      // Only deduct wager once (backend handles this with parlay_leg_index)
       setBalance(function(b){return b-w;});
       setBets(function(prev){return[{id:"b_"+Date.now(),bet_type:"parlay",parlay_group:pg,legs:parlayLegs.map(function(l){return{...l,bet_type:l.betType,result:"pending"};}),wager:w,result:"pending",potential_profit:calcParlayPayout(parlayLegs,w),created_at:new Date().toISOString()},...prev];});
       setParlayLegs([]);setParlayWager("");setSubTab("board");
