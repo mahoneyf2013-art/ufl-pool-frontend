@@ -19,8 +19,40 @@ function TmLogo({team,size}){
 function calcPayout(w,odds){if(!w||w<=0)return 0;const o=odds==null?-110:typeof odds==="string"?parseInt(odds):odds;return o<0?Math.round(w*(100/Math.abs(o))):Math.round(w*(o/100));}
 function fmtOdds(odds){if(odds==null)return"-110";const o=typeof odds==="string"?parseInt(odds):odds;return o>0?"+"+o:""+o;}
 function calcParlayPayout(legs,w){if(!w||w<=0||legs.length<2)return 0;let m=1;for(const l of legs){if(l.betType==="moneyline"&&l.odds!=null){const o=typeof l.odds==="string"?parseInt(l.odds):l.odds;m*=o<0?1+100/Math.abs(o):1+o/100;}else m*=1.909;}return Math.round(w*m)-w;}
-function getToken(){return localStorage.getItem("ufl_token");}
+function getToken(){try{return localStorage.getItem("ufl_token");}catch(e){return null;}}
+function setToken(t){try{localStorage.setItem("ufl_token",t);}catch(e){}}
+function removeToken(){try{localStorage.removeItem("ufl_token");}catch(e){}}
 async function api(path,opt={}){const t=getToken(),h={"Content-Type":"application/json"};if(t)h.Authorization="Bearer "+t;const r=await fetch(API_URL+path,{...opt,headers:h});const d=await r.json();if(!r.ok)throw new Error(d.error||"Failed");return d;}
+
+/* Helper: group bets by parlay_group. Returns array of items, each either a single bet or a parlay group */
+function groupBetsByParlay(betsList){
+  var grouped=[];var pm={};
+  for(var i=0;i<betsList.length;i++){
+    var b=betsList[i];
+    if(b.parlay_group){
+      var k=b.parlay_group;
+      if(!pm[k]){pm[k]={parlay_group:b.parlay_group,isParlay:true,legs:[b],wager:b.wager,result:b.result,created_at:b.created_at,display_name:b.display_name,username:b.username,is_own:b.is_own};grouped.push(pm[k]);}
+      else{pm[k].legs.push(b);/* parlay result: if any leg lost, parlay lost. if all won, parlay won. otherwise pending */}
+    }else grouped.push({...b,isParlay:false});
+  }
+  /* Fix parlay result based on legs */
+  Object.values(pm).forEach(function(p){
+    var hasLoss=p.legs.some(function(l){return l.result==="loss";});
+    var allWon=p.legs.every(function(l){return l.result==="win";});
+    var allSettled=p.legs.every(function(l){return l.result==="win"||l.result==="loss"||l.result==="push";});
+    if(hasLoss)p.result="loss";
+    else if(allWon)p.result="win";
+    else if(allSettled)p.result="push";
+    else p.result="pending";
+  });
+  return grouped;
+}
+
+/* Check if a game has kicked off (commence_time is in the past) */
+function hasKickedOff(commenceTime){
+  if(!commenceTime)return false;
+  return new Date(commenceTime).getTime()<=Date.now();
+}
 
 const C={bg:"#0c0e12",card:"#151820",cardB:"#1c2030",border:"#252a38",blue:"#3b82f6",green:"#22c55e",red:"#ef4444",amber:"#f59e0b",purple:"#8b5cf6",muted:"#6b7280",text:"#e5e7eb",dim:"#94a3b8"};
 
@@ -155,6 +187,66 @@ function LineHistoryPanel({data}){
   );
 }
 
+/* ═══ Parlay Bet Card — reusable for My Bets, Activity, and Live ═══ */
+function ParlayBetCard({parlay,tm,betDesc,allGames,showUser}){
+  var col=parlay.result==="win"?C.green:parlay.result==="loss"?C.red:C.blue;
+  var borderCol=parlay.result==="win"?C.green+"44":parlay.result==="loss"?C.red+"44":C.border;
+  var totalPayout=0;
+  if(parlay.result==="win"){
+    var m=1;
+    for(var i=0;i<parlay.legs.length;i++){
+      var l=parlay.legs[i];
+      var o=l.odds!=null?(typeof l.odds==="string"?parseInt(l.odds):l.odds):-110;
+      m*=o<0?1+100/Math.abs(o):1+o/100;
+    }
+    totalPayout=Math.round(parlay.wager*m);
+  }
+  return (
+    <Card style={{borderColor:borderCol}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          {showUser && <span style={{fontWeight:700,fontSize:14}}>{parlay.display_name}</span>}
+          {parlay.is_own && <Badge text="You" color={C.blue}/>}
+          <Badge text={"Parlay • "+parlay.legs.length+" legs"} color={C.purple}/>
+        </div>
+        <Badge text={parlay.result} color={parlay.result==="win"?C.green:parlay.result==="loss"?C.red:parlay.result==="push"?"#a3a3a3":C.blue}/>
+      </div>
+      {parlay.legs.map(function(leg,j){
+        /* Determine if this leg's game has kicked off */
+        var gameKicked=leg.revealed||hasKickedOff(leg.commence_time);
+        /* Also check allGames for commence_time if not on the leg */
+        if(!gameKicked&&allGames){
+          var gm=allGames.find(function(g){return g.id===leg.game_id;});
+          if(gm)gameKicked=hasKickedOff(gm.commence_time);
+        }
+        var legResult=leg.result||"pending";
+        var legCol=legResult==="win"?C.green:legResult==="loss"?C.red:C.text;
+        return (
+          <div key={j} style={{fontSize:13,padding:"4px 0",borderBottom:j<parlay.legs.length-1?"1px solid "+C.border+"44":"none",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            {gameKicked ? (
+              <span>
+                <span style={{color:C.dim}}>{tm(leg.away_team).abbr}@{tm(leg.home_team).abbr}: </span>
+                <strong style={{color:legCol}}>{betDesc(leg.bet_type,leg.pick,leg.line,leg.odds)}</strong>
+              </span>
+            ) : (
+              <span style={{color:C.amber}}>🔒 Hidden until kickoff</span>
+            )}
+            {legResult!=="pending" && <Badge text={legResult} color={legResult==="win"?C.green:legResult==="loss"?C.red:"#a3a3a3"}/>}
+          </div>
+        );
+      })}
+      <div style={{marginTop:8,padding:"6px 10px",background:C.cardB,borderRadius:6,display:"flex",justifyContent:"space-between",fontSize:12}}>
+        <div><span style={{color:C.dim}}>Wager: </span><span style={{fontWeight:700}}>{parlay.wager}</span></div>
+        {parlay.result==="pending" && <div><span style={{color:C.dim}}>To win: </span><span style={{fontWeight:700,color:C.green}}>+{calcParlayPayout(parlay.legs.map(function(l){return{betType:l.bet_type,odds:l.odds};}),parlay.wager)}</span></div>}
+        {parlay.result==="win" && <div style={{color:C.green,fontWeight:700}}>+{totalPayout-parlay.wager}</div>}
+        {parlay.result==="loss" && <div style={{color:C.red,fontWeight:700}}>-{parlay.wager}</div>}
+        {parlay.result==="push" && <div style={{color:"#a3a3a3",fontWeight:700}}>Returned</div>}
+      </div>
+      <div style={{fontSize:11,color:C.muted,marginTop:4}}>{new Date(parlay.created_at).toLocaleString()}</div>
+    </Card>
+  );
+}
+
 function AppInner(){
   const[user,setUser]=useState(null);
   const[authView,setAuthView]=useState("login");
@@ -207,6 +299,7 @@ function AppInner(){
   const[sidebarOpen,setSidebarOpen]=useState(false);
   const[section,setSection]=useState("bet");
   const[subTab,setSubTab]=useState("board");
+  const[liveRefreshing,setLiveRefreshing]=useState(false);
   const chatEndRef=useRef(null);
 
   const showMsg=function(t,type){setMsg({t:t,type:type||"info"});setTimeout(function(){setMsg(null);},4000);};
@@ -214,7 +307,7 @@ function AppInner(){
 
   useEffect(function(){const s=document.createElement("style");s.textContent="@keyframes spin{to{transform:rotate(360deg)}}";document.head.appendChild(s);return function(){document.head.removeChild(s);};},[]);
   useEffect(function(){const p=new URLSearchParams(window.location.search);const t=p.get("reset");if(t)api("/api/auth/verify-reset/"+t).then(function(){setResetToken(t);}).catch(function(){showMsg("Invalid reset link","error");window.history.replaceState({},"",window.location.pathname);});},[]);
-  useEffect(function(){const t=getToken();if(t&&API_URL)api("/api/auth/me").then(function(u){setUser({id:u.id,username:u.username,displayName:u.display_name});}).catch(function(){localStorage.removeItem("ufl_token");});},[]);
+  useEffect(function(){const t=getToken();if(t&&API_URL)api("/api/auth/me").then(function(u){setUser({id:u.id,username:u.username,displayName:u.display_name});}).catch(function(){removeToken();});},[]);
   useEffect(function(){if(user)api("/api/my-pools").then(setPools).catch(function(){});},[user]);
   useEffect(function(){if(user)api("/api/espn/teams").then(setEspnTeams).catch(function(){});},[user]);
   useEffect(function(){if(subTab==="news")api("/api/espn/news").then(function(d){setNews(d.articles||[]);}).catch(function(){});},[subTab]);
@@ -237,23 +330,23 @@ function AppInner(){
         if(!resetForm.password||!resetForm.confirm){showMsg("Fill both fields","error");return;}
         if(resetForm.password!==resetForm.confirm){showMsg("No match","error");return;}
         var d=await api("/api/auth/reset-password",{method:"POST",body:JSON.stringify({token:resetToken,newPassword:resetForm.password})});
-        localStorage.setItem("ufl_token",d.token);setUser(d.user);setResetToken(null);
+        setToken(d.token);setUser(d.user);setResetToken(null);
         window.history.replaceState({},"",window.location.pathname);showMsg("Password reset!");return;
       }
       if(authView==="register"){
         if(!authForm.username||!authForm.email||!authForm.password){showMsg("All fields required","error");return;}
         var d2=await api("/api/auth/register",{method:"POST",body:JSON.stringify({username:authForm.username,email:authForm.email,password:authForm.password,displayName:authForm.displayName||authForm.username})});
-        localStorage.setItem("ufl_token",d2.token);setUser(d2.user);showMsg("Account created!");
+        setToken(d2.token);setUser(d2.user);showMsg("Account created!");
       } else {
         if(!authForm.username||!authForm.password){showMsg("Enter credentials","error");return;}
         var d3=await api("/api/auth/login",{method:"POST",body:JSON.stringify({username:authForm.username,password:authForm.password})});
-        localStorage.setItem("ufl_token",d3.token);setUser(d3.user);showMsg("Logged in!");
+        setToken(d3.token);setUser(d3.user);showMsg("Logged in!");
       }
       setPools([]);
     }catch(e){showMsg(e.message,"error");}finally{setAuthLoading(false);}
   };
 
-  var logout=function(){localStorage.removeItem("ufl_token");setUser(null);setScreen("pools");setActivePool(null);};
+  var logout=function(){removeToken();setUser(null);setScreen("pools");setActivePool(null);};
 
   var createPool=async function(){
     if(!createForm.name)return showMsg("Enter name","error");
@@ -341,7 +434,7 @@ function AppInner(){
         await api("/api/bet",{method:"POST",body:JSON.stringify({pool_id:activePool.id,game_id:l.gameId,bet_type:l.betType,pick:l.pick,line:l.line,odds:l.odds,wager:w,parlay_group:pg})});
       }
       setBalance(function(b){return b-w;});
-      setBets(function(prev){return[{id:"b_"+Date.now(),bet_type:"parlay",legs:[...parlayLegs],wager:w,result:"pending",potential_profit:calcParlayPayout(parlayLegs,w)},...prev];});
+      setBets(function(prev){return[{id:"b_"+Date.now(),bet_type:"parlay",parlay_group:pg,legs:parlayLegs.map(function(l){return{...l,bet_type:l.betType,result:"pending"};}),wager:w,result:"pending",potential_profit:calcParlayPayout(parlayLegs,w),created_at:new Date().toISOString()},...prev];});
       setParlayLegs([]);setParlayWager("");setSubTab("board");
       showMsg("Parlay: "+w+" to win "+calcParlayPayout(parlayLegs,w)+"!");
     }catch(e){showMsg(e.message,"error");}
@@ -384,9 +477,19 @@ function AppInner(){
     }
   };
 
-  var loadGameSummary=async function(eid){
-    if(!eid)return;setSummaryLoading(true);
-    try{setGameSummary(await api("/api/espn/summary/"+eid));}catch(e){}finally{setSummaryLoading(false);}
+  var loadGameSummary=async function(eid,gameAbbr){
+    if(!eid&&!gameAbbr)return;setSummaryLoading(true);
+    try{
+      // Try by event ID first, fallback to team abbreviation
+      var data;
+      if(eid){
+        data=await api("/api/espn/summary/"+eid);
+      }
+      if((!data||(!data.boxscore?.teams?.length&&!data.scoringPlays?.length))&&gameAbbr){
+        try{data=await api("/api/espn/summary-by-team/"+gameAbbr);}catch(e2){}
+      }
+      if(data)setGameSummary(data);
+    }catch(e){}finally{setSummaryLoading(false);}
   };
 
   var viewPlayer=async function(username){
@@ -406,6 +509,15 @@ function AppInner(){
       setBets(results[2]);
       try{setActivity(await api("/api/pools/"+activePool.id+"/activity"));}catch(e){}
     }catch(e){}
+  };
+
+  var refreshLive=async function(){
+    if(!activePool)return;
+    setLiveRefreshing(true);
+    try{
+      var d=await api("/api/pools/"+activePool.id+"/live");
+      setLiveData(d);
+    }catch(e){}finally{setLiveRefreshing(false);}
   };
 
   // ═══ AUTH SCREEN ═══
@@ -507,6 +619,14 @@ function AppInner(){
   var pc=members.filter(function(m){return m.status==="pending";}).length;
   var tab=subTab;
 
+  // Helper to render a bet description
+  var betDesc=function(bt,pick,line,odds){
+    if(bt==="spread")return tm(pick).abbr+" "+(line>0?"+":"")+line;
+    if(bt==="over")return "Over "+line;
+    if(bt==="under")return "Under "+line;
+    return tm(pick).abbr+" ML";
+  };
+
   var navItems=[
     {id:"bet",label:"Bet",icon:"🎯",subs:[["board","Board"],["parlay","Parlay"+(parlayLegs.length?" ("+parlayLegs.length+")":"")]]},
     {id:"games",label:"Games",icon:"🏈",subs:[["live","Live"],["schedule","Schedule"],["recap","Recap"]]},
@@ -524,14 +644,6 @@ function AppInner(){
   };
 
   var currentNav=navItems.find(function(n){return n.id===section;});
-
-  // Helper to render a bet description
-  var betDesc=function(bt,pick,line,odds){
-    if(bt==="spread")return tm(pick).abbr+" "+(line>0?"+":"")+line;
-    if(bt==="over")return "Over "+line;
-    if(bt==="under")return "Under "+line;
-    return tm(pick).abbr+" ML";
-  };
 
   return (
     <div style={{background:C.bg,minHeight:"100vh",color:C.text,fontFamily:"-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"}}>
@@ -691,32 +803,142 @@ function AppInner(){
         {/* ═══ LIVE ═══ */}
         {tab==="live" && (
           <div>
-            <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10,fontSize:12,color:C.green}}><div style={{width:8,height:8,borderRadius:"50%",background:C.green}}/> Auto-refresh 30s</div>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:C.green}}><div style={{width:8,height:8,borderRadius:"50%",background:C.green}}/> Auto-refresh 30s</div>
+              <Btn small bg="#374151" onClick={refreshLive} disabled={liveRefreshing}>{liveRefreshing?"Refreshing...":"↻ Refresh Now"}</Btn>
+            </div>
             {liveData.length===0 && <Card style={{textAlign:"center",padding:30,color:C.muted}}>No games in progress</Card>}
             {liveData.map(function(g){
               var aw=tm(g.away_team),hm=tm(g.home_team),fin=g.status==="final";
+              var ed=g.espn_detail||null;
+              var isLiveGame=ed&&ed.state==="in";
+              var gameBets=g.pool_bets||[];
+              var groupedGameBets=groupBetsByParlay(gameBets);
               return (
-                <Card key={g.id} style={{borderColor:fin?C.muted+"44":C.green+"44"}}>
-                  <div style={{display:"flex",justifyContent:"center",gap:20,marginBottom:8,padding:"10px 0",background:"#111",borderRadius:6}}>
-                    <div style={{textAlign:"center"}}><TmLogo team={aw} size={32}/><div style={{fontSize:13,fontWeight:700,marginTop:4}}>{aw.abbr}</div><div style={{fontSize:28,fontWeight:800}}>{g.away_score??"-"}</div></div>
-                    <div style={{alignSelf:"center"}}><Badge text={fin?"Final":"Live"} color={fin?C.muted:C.green}/></div>
-                    <div style={{textAlign:"center"}}><TmLogo team={hm} size={32}/><div style={{fontSize:13,fontWeight:700,marginTop:4}}>{hm.abbr}</div><div style={{fontSize:28,fontWeight:800}}>{g.home_score??"-"}</div></div>
+                <Card key={g.id} style={{borderColor:fin?C.muted+"44":isLiveGame?C.green+"44":C.border}}>
+                  {/* Scoreboard */}
+                  <div style={{background:"#111",borderRadius:8,padding:"12px 8px",marginBottom:10}}>
+                    <div style={{display:"flex",justifyContent:"center",gap:16,marginBottom:6}}>
+                      <div style={{textAlign:"center",flex:1}}>
+                        {ed?.away_logo?<img src={ed.away_logo} alt="" style={{width:36,height:36,objectFit:"contain"}}/>:<TmLogo team={aw} size={36}/>}
+                        <div style={{fontSize:13,fontWeight:700,marginTop:4}}>{ed?.away_abbr||aw.abbr}</div>
+                        {ed?.away_record && <div style={{fontSize:10,color:C.muted}}>({ed.away_record})</div>}
+                        <div style={{fontSize:32,fontWeight:800,marginTop:2}}>{g.away_score??ed?.away_score??"-"}</div>
+                      </div>
+                      <div style={{alignSelf:"center",textAlign:"center"}}>
+                        {fin ? <Badge text="Final" color={C.muted}/> :
+                         isLiveGame ? <div><Badge text="Live" color={C.green}/><div style={{fontSize:18,fontWeight:800,color:C.green,marginTop:4}}>{ed.detail||("Q"+ed.period)}</div><div style={{fontSize:14,color:C.text,fontWeight:600}}>{ed.clock}</div></div> :
+                         ed?.state==="pre" ? <div><Badge text="Pre" color={C.amber}/><div style={{fontSize:11,color:C.dim,marginTop:4}}>{ed.detail||""}</div></div> :
+                         <Badge text={g.status||"—"} color={C.muted}/>
+                        }
+                      </div>
+                      <div style={{textAlign:"center",flex:1}}>
+                        {ed?.home_logo?<img src={ed.home_logo} alt="" style={{width:36,height:36,objectFit:"contain"}}/>:<TmLogo team={hm} size={36}/>}
+                        <div style={{fontSize:13,fontWeight:700,marginTop:4}}>{ed?.home_abbr||hm.abbr}</div>
+                        {ed?.home_record && <div style={{fontSize:10,color:C.muted}}>({ed.home_record})</div>}
+                        <div style={{fontSize:32,fontWeight:800,marginTop:2}}>{g.home_score??ed?.home_score??"-"}</div>
+                      </div>
+                    </div>
+                    {/* Quarter-by-quarter linescore */}
+                    {ed?.linescores && (
+                      <div style={{display:"grid",gridTemplateColumns:"60px repeat("+(ed.linescores.home.length||4)+", 1fr) 40px",gap:2,fontSize:11,marginTop:8,padding:"4px 8px",background:"#0a0c10",borderRadius:6}}>
+                        <div style={{color:C.dim,fontWeight:600}}></div>
+                        {(ed.linescores.home||[]).map(function(_,qi){return <div key={qi} style={{textAlign:"center",color:C.dim,fontWeight:600}}>{"Q"+(qi+1)}</div>;})}
+                        <div style={{textAlign:"center",color:C.dim,fontWeight:700}}>T</div>
+                        <div style={{fontWeight:600}}>{ed.away_abbr}</div>
+                        {(ed.linescores.away||[]).map(function(v,qi){return <div key={qi} style={{textAlign:"center"}}>{v!=null?v:"-"}</div>;})}
+                        <div style={{textAlign:"center",fontWeight:800}}>{g.away_score??"-"}</div>
+                        <div style={{fontWeight:600}}>{ed.home_abbr}</div>
+                        {(ed.linescores.home||[]).map(function(v,qi){return <div key={qi} style={{textAlign:"center"}}>{v!=null?v:"-"}</div>;})}
+                        <div style={{textAlign:"center",fontWeight:800}}>{g.home_score??"-"}</div>
+                      </div>
+                    )}
                   </div>
-                  {g.pool_bets?.length>0 && (
+
+                  {/* Situation (down & distance, possession) */}
+                  {isLiveGame && ed?.situation && (
+                    <div style={{background:ed.situation.isRedZone?"#7f1d1d33":C.cardB,border:ed.situation.isRedZone?"1px solid "+C.red+"44":"1px solid "+C.border,borderRadius:8,padding:"8px 12px",marginBottom:10}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <div>
+                          <div style={{fontWeight:700,fontSize:14,color:ed.situation.isRedZone?C.red:C.text}}>
+                            {ed.situation.isRedZone?"🔴 ":""}{ed.situation.downDistanceText||""}
+                          </div>
+                          {ed.situation.possessionText && <div style={{fontSize:12,color:C.dim,marginTop:2}}>Ball: {ed.situation.possessionText}</div>}
+                        </div>
+                        <div style={{display:"flex",gap:12,fontSize:11}}>
+                          <span style={{color:C.dim}}>TO: {ed.away_abbr} {ed.situation.awayTimeouts??"-"}</span>
+                          <span style={{color:C.dim}}>{ed.home_abbr} {ed.situation.homeTimeouts??"-"}</span>
+                        </div>
+                      </div>
+                      {ed.lastPlay && <div style={{fontSize:12,color:C.dim,marginTop:6,fontStyle:"italic",borderTop:"1px solid "+C.border+"44",paddingTop:6}}>Last: {ed.lastPlay.text}</div>}
+                    </div>
+                  )}
+
+                  {/* Leaders */}
+                  {ed?.leaders && ed.leaders.length>0 && !fin && (
+                    <div style={{marginBottom:10}}>
+                      <div style={{fontSize:11,fontWeight:700,color:C.dim,marginBottom:4,textTransform:"uppercase"}}>Game Leaders</div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat("+Math.min(ed.leaders.length,3)+", 1fr)",gap:6}}>
+                        {ed.leaders.slice(0,3).map(function(ld,li){
+                          return (
+                            <div key={li} style={{background:C.cardB,borderRadius:6,padding:"6px 8px"}}>
+                              <div style={{fontSize:10,color:C.amber,fontWeight:700,marginBottom:3,textTransform:"uppercase"}}>{ld.shortName||ld.name}</div>
+                              {ld.athletes.map(function(a,ai){
+                                return <div key={ai} style={{fontSize:11,display:"flex",justifyContent:"space-between",padding:"1px 0"}}><span style={{fontWeight:600}}>{a.name}</span><span style={{color:C.dim}}>{a.value}</span></div>;
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Pool Bets */}
+                  {groupedGameBets.length>0 ? (
                     <div>
                       <div style={{fontSize:12,fontWeight:700,color:C.dim,marginBottom:6,textTransform:"uppercase"}}>Pool Bets</div>
-                      {g.pool_bets.map(function(b,i){
-                        var col=b.result==="win"?C.green:b.result==="loss"?C.red:C.text;
+                      {groupedGameBets.map(function(item,i){
+                        if(item.isParlay){
+                          return (
+                            <div key={item.parlay_group||i} style={{background:C.cardB,borderRadius:8,padding:10,marginBottom:6,border:"1px solid "+C.purple+"33"}}>
+                              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                                  <span style={{fontWeight:700,fontSize:13}}>{item.display_name}</span>
+                                  <Badge text={"Parlay • "+item.legs.length+" legs"} color={C.purple}/>
+                                </div>
+                                <span style={{fontWeight:600,fontSize:13}}>{item.wager} pts</span>
+                              </div>
+                              {item.legs.map(function(leg,j){
+                                var isThisGame=leg.game_id===g.id;
+                                var legKicked=leg.revealed||isThisGame||hasKickedOff(leg.commence_time);
+                                if(!legKicked&&games){var gm2=games.find(function(gx){return gx.id===leg.game_id;});if(gm2)legKicked=hasKickedOff(gm2.commence_time);}
+                                var legCol=leg.result==="win"?C.green:leg.result==="loss"?C.red:C.text;
+                                return (
+                                  <div key={j} style={{fontSize:12,padding:"3px 0",display:"flex",justifyContent:"space-between",alignItems:"center",borderBottom:j<item.legs.length-1?"1px solid "+C.border+"33":"none"}}>
+                                    {legKicked ? (
+                                      <span><span style={{color:C.dim}}>{tm(leg.away_team).abbr}@{tm(leg.home_team).abbr}: </span><strong style={{color:legCol}}>{betDesc(leg.bet_type,leg.pick,leg.line,leg.odds)}</strong></span>
+                                    ) : (
+                                      <span style={{color:C.amber}}>🔒 Hidden until kickoff</span>
+                                    )}
+                                    {leg.result&&leg.result!=="pending" && <Badge text={leg.result} color={leg.result==="win"?C.green:leg.result==="loss"?C.red:"#a3a3a3"}/>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        }
+                        var col=item.result==="win"?C.green:item.result==="loss"?C.red:C.text;
                         return (
-                          <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:13,borderBottom:i<g.pool_bets.length-1?"1px solid "+C.border:"none",color:col}}>
-                            <span>{b.display_name}: {betDesc(b.bet_type,b.pick,b.line,b.odds)}</span>
-                            <span style={{fontWeight:600}}>{b.wager} pts</span>
+                          <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"4px 0",fontSize:13,borderBottom:i<groupedGameBets.length-1?"1px solid "+C.border:"none",color:col}}>
+                            <span>{item.display_name}: {betDesc(item.bet_type,item.pick,item.line,item.odds)}</span>
+                            <span style={{fontWeight:600}}>{item.wager} pts</span>
                           </div>
                         );
                       })}
                     </div>
+                  ) : (
+                    <div style={{fontSize:12,color:C.muted,textAlign:"center"}}>No pool bets</div>
                   )}
-                  {(!g.pool_bets||!g.pool_bets.length) && <div style={{fontSize:12,color:C.muted,textAlign:"center"}}>No pool bets</div>}
                 </Card>
               );
             })}
@@ -747,7 +969,7 @@ function AppInner(){
                           if(isExp){setSchedExpanded(null);setSchedLineHist(null);setGameSummary(null);return;}
                           setSchedExpanded(gk);setSchedLineHist(null);setGameSummary(null);
                           if(g.odds_game_id)api("/api/games/"+g.odds_game_id+"/line-history").then(setSchedLineHist).catch(function(){});
-                          if(g.espn_id)loadGameSummary(g.espn_id);
+                          loadGameSummary(g.espn_id,g.home_abbr||hm.abbr);
                         }} style={{cursor:"pointer"}}>
                           {fin ? (
                             <div style={{display:"flex",justifyContent:"center",gap:20,marginBottom:8,padding:"8px 0",background:"#111",borderRadius:6}}>
@@ -797,7 +1019,6 @@ function AppInner(){
                           )}
                         </div>
 
-                        {/* Expanded details */}
                         {isExp && (
                           <div style={{marginTop:10}}>
                             {g.spread_home!=null && (
@@ -819,33 +1040,53 @@ function AppInner(){
                             {gameSummary && schedExpanded===gk && (
                               <div style={{padding:10,background:C.cardB,borderRadius:8,marginBottom:8}}>
                                 <div style={{fontWeight:700,fontSize:13,marginBottom:8,color:C.green}}>Game Stats</div>
+                                {/* Leaders */}
+                                {gameSummary.leaders?.length>0 && (
+                                  <div style={{marginBottom:10}}>
+                                    <div style={{fontSize:11,color:C.dim,fontWeight:700,marginBottom:4,textTransform:"uppercase"}}>Leaders</div>
+                                    <div style={{display:"grid",gridTemplateColumns:"repeat("+Math.min(gameSummary.leaders.length,3)+", 1fr)",gap:6}}>
+                                      {gameSummary.leaders.slice(0,3).map(function(ld,li){
+                                        return (
+                                          <div key={li} style={{background:C.bg,borderRadius:6,padding:"6px 8px"}}>
+                                            <div style={{fontSize:10,color:C.amber,fontWeight:700,marginBottom:3,textTransform:"uppercase"}}>{ld.shortDisplayName||ld.displayName||ld.name||""}</div>
+                                            {(ld.leaders||[]).slice(0,2).map(function(a,ai){
+                                              return <div key={ai} style={{fontSize:11,display:"flex",justifyContent:"space-between",padding:"1px 0"}}><span style={{fontWeight:600}}>{a.athlete?.displayName||a.displayName||""}</span><span style={{color:C.dim}}>{a.displayValue||a.value||""}</span></div>;
+                                            })}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+                                )}
                                 {gameSummary.scoringPlays?.length>0 && (
                                   <div style={{marginBottom:10}}>
                                     <div style={{fontSize:11,color:C.dim,fontWeight:700,marginBottom:4,textTransform:"uppercase"}}>Scoring</div>
                                     {gameSummary.scoringPlays.map(function(sp,si){
-                                      var st=espnTeams.find(function(t){return t.id===sp.team?.id?.toString();});
+                                      var st=espnTeams.find(function(t){return t.id===sp.team?.id?.toString()||t.id===(sp.team?.id);});
                                       return (
                                         <div key={si} style={{fontSize:12,padding:"4px 0",borderBottom:"1px solid "+C.border+"22",display:"flex",gap:8,alignItems:"center"}}>
                                           {st && <TmLogo team={{logo:st.logo,color:st.color}} size={14}/>}
-                                          <span style={{color:C.dim,minWidth:30}}>{sp.clock?.displayValue||""}</span>
-                                          <span style={{flex:1}}>{sp.text?.substring(0,80)}</span>
+                                          <span style={{color:C.dim,minWidth:30}}>{sp.clock?.displayValue||sp.clock||""}</span>
+                                          <span style={{flex:1}}>{(sp.text||sp.shortText||"").substring(0,80)}</span>
                                           <span style={{fontWeight:700}}>{sp.awayScore}-{sp.homeScore}</span>
                                         </div>
                                       );
                                     })}
                                   </div>
                                 )}
-                                {gameSummary.boxscore?.teams && (
+                                {gameSummary.boxscore?.teams?.length>0 && (
                                   <div>
                                     <div style={{fontSize:11,color:C.dim,fontWeight:700,marginBottom:4,textTransform:"uppercase"}}>Team Stats</div>
                                     {gameSummary.boxscore.teams.map(function(t,ti){
-                                      var ti2=espnTeams.find(function(x){return x.id===t.team?.id?.toString();});
+                                      var ti2=espnTeams.find(function(x){return x.id===t.team?.id?.toString()||x.id===(t.team?.id);});
+                                      var stats=t.statistics||t.stats||[];
+                                      if(!stats.length)return null;
                                       return (
                                         <div key={ti} style={{marginBottom:8}}>
-                                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>{ti2 && <TmLogo team={{logo:ti2.logo,color:ti2.color}} size={16}/>}<span style={{fontWeight:700,fontSize:13}}>{t.team?.displayName||t.team?.abbreviation}</span></div>
+                                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>{ti2 && <TmLogo team={{logo:ti2.logo,color:ti2.color}} size={16}/>}<span style={{fontWeight:700,fontSize:13}}>{t.team?.displayName||t.team?.abbreviation||""}</span></div>
                                           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:4}}>
-                                            {t.statistics?.slice(0,8).map(function(s,si){
-                                              return <div key={si} style={{fontSize:11,padding:"3px 4px",background:C.bg,borderRadius:4}}><div style={{color:C.dim,fontSize:9}}>{s.label||s.name}</div><div style={{fontWeight:600}}>{s.displayValue}</div></div>;
+                                            {stats.slice(0,8).map(function(s,si){
+                                              return <div key={si} style={{fontSize:11,padding:"3px 4px",background:C.bg,borderRadius:4}}><div style={{color:C.dim,fontSize:9}}>{s.label||s.name||s.displayName||""}</div><div style={{fontWeight:600}}>{s.displayValue||s.value||"—"}</div></div>;
                                             })}
                                           </div>
                                         </div>
@@ -853,20 +1094,26 @@ function AppInner(){
                                     })}
                                   </div>
                                 )}
-                                {gameSummary.boxscore?.players && (
+                                {gameSummary.boxscore?.players?.length>0 && (
                                   <div style={{marginTop:8}}>
                                     <div style={{fontSize:11,color:C.dim,fontWeight:700,marginBottom:4,textTransform:"uppercase"}}>Key Players</div>
                                     {gameSummary.boxscore.players.map(function(pt,pti){
-                                      var ti3=espnTeams.find(function(x){return x.id===pt.team?.id?.toString();});
+                                      var ti3=espnTeams.find(function(x){return x.id===pt.team?.id?.toString()||x.id===(pt.team?.id);});
+                                      var statGroups=pt.statistics||pt.stats||[];
+                                      if(!statGroups.length)return null;
                                       return (
                                         <div key={pti} style={{marginBottom:8}}>
-                                          <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:4,fontSize:12,fontWeight:700}}>{ti3 && <TmLogo team={{logo:ti3.logo,color:ti3.color}} size={14}/>}{pt.team?.displayName}</div>
-                                          {pt.statistics?.slice(0,3).map(function(sg,sgi){
+                                          <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:4,fontSize:12,fontWeight:700}}>{ti3 && <TmLogo team={{logo:ti3.logo,color:ti3.color}} size={14}/>}{pt.team?.displayName||""}</div>
+                                          {statGroups.slice(0,3).map(function(sg,sgi){
+                                            var athletes=sg.athletes||sg.leaders||[];
+                                            if(!athletes.length)return null;
                                             return (
                                               <div key={sgi} style={{marginBottom:4}}>
-                                                <div style={{fontSize:10,color:C.amber,fontWeight:600}}>{sg.name}</div>
-                                                {sg.athletes?.slice(0,2).map(function(a,ai){
-                                                  return <div key={ai} style={{fontSize:12,display:"flex",justifyContent:"space-between",padding:"2px 0"}}><span>{a.athlete?.displayName}</span><span style={{color:C.dim}}>{a.stats?.join(", ")}</span></div>;
+                                                <div style={{fontSize:10,color:C.amber,fontWeight:600}}>{sg.name||sg.displayName||""}</div>
+                                                {athletes.slice(0,2).map(function(a,ai){
+                                                  var name=a.athlete?.displayName||a.displayName||a.name||"";
+                                                  var statLine=Array.isArray(a.stats)?a.stats.join(", "):(a.displayValue||a.value||"");
+                                                  return <div key={ai} style={{fontSize:12,display:"flex",justifyContent:"space-between",padding:"2px 0"}}><span>{name}</span><span style={{color:C.dim}}>{statLine}</span></div>;
                                                 })}
                                               </div>
                                             );
@@ -876,7 +1123,7 @@ function AppInner(){
                                     })}
                                   </div>
                                 )}
-                                {!gameSummary.boxscore?.teams && !gameSummary.scoringPlays?.length && <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:10}}>No detailed stats available for this game</div>}
+                                {!gameSummary.boxscore?.teams?.length && !gameSummary.scoringPlays?.length && !gameSummary.leaders?.length && <div style={{color:C.muted,fontSize:13,textAlign:"center",padding:10}}>No detailed stats available for this game</div>}
                               </div>
                             )}
                             {summaryLoading && schedExpanded===gk && <div style={{textAlign:"center",padding:10}}><Spinner/></div>}
@@ -963,46 +1210,24 @@ function AppInner(){
           <div>
             {activity.length===0 && <Card style={{textAlign:"center",color:C.muted,padding:30}}>No bets yet</Card>}
             {(function(){
-              var grouped=[];var pm={};
-              for(var i=0;i<activity.length;i++){
-                var b=activity[i];
-                if(b.parlay_group){
-                  var k=b.parlay_group+b.display_name;
-                  if(!pm[k]){pm[k]={...b,legs:[b],isParlay:true};grouped.push(pm[k]);}
-                  else pm[k].legs.push(b);
-                }else grouped.push({...b,isParlay:false});
-              }
+              var grouped=groupBetsByParlay(activity);
               return grouped.map(function(it,i){
+                if(it.isParlay){
+                  return <ParlayBetCard key={it.parlay_group||i} parlay={it} tm={tm} betDesc={betDesc} allGames={games} showUser={true}/>;
+                }
                 return (
                   <Card key={i} style={{borderColor:it.result==="win"?C.green+"44":it.result==="loss"?C.red+"44":C.border}}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                       <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontWeight:700,fontSize:14}}>{it.display_name}</span>{it.is_own && <Badge text="You" color={C.blue}/>}</div>
                       <Badge text={it.result} color={it.result==="win"?C.green:it.result==="loss"?C.red:it.result==="push"?"#a3a3a3":C.blue}/>
                     </div>
-                    {it.isParlay ? (
-                      <div>
-                        <div style={{fontSize:12,color:C.dim,marginBottom:4}}>Parlay — {it.legs.length} legs • {it.wager} pts</div>
-                        {it.legs.map(function(l,j){
-                          return (
-                            <div key={j} style={{fontSize:13,padding:"3px 0"}}>
-                              {l.revealed ? (
-                                <span><span style={{color:C.dim}}>{tm(l.away_team).abbr}@{tm(l.home_team).abbr}: </span><strong>{betDesc(l.bet_type,l.pick,l.line,l.odds)}</strong></span>
-                              ) : (
-                                <span style={{color:C.amber}}>🔒 Hidden until kickoff</span>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div style={{fontSize:14}}>
-                        {it.revealed ? (
-                          <span><span style={{color:C.dim,fontSize:12}}>{tm(it.away_team).abbr}@{tm(it.home_team).abbr}: </span><strong>{betDesc(it.bet_type,it.pick,it.line,it.odds)}</strong><span style={{color:C.dim,fontSize:12}}> • {it.wager} pts</span></span>
-                        ) : (
-                          <span style={{color:C.amber}}>🔒 {it.wager} pts — Hidden until kickoff</span>
-                        )}
-                      </div>
-                    )}
+                    <div style={{fontSize:14}}>
+                      {it.revealed||hasKickedOff(it.commence_time) ? (
+                        <span><span style={{color:C.dim,fontSize:12}}>{tm(it.away_team).abbr}@{tm(it.home_team).abbr}: </span><strong>{betDesc(it.bet_type,it.pick,it.line,it.odds)}</strong><span style={{color:C.dim,fontSize:12}}> • {it.wager} pts</span></span>
+                      ) : (
+                        <span style={{color:C.amber}}>🔒 {it.wager} pts — Hidden until kickoff</span>
+                      )}
+                    </div>
                     {it.result==="win" && it.payout>0 && <div style={{fontSize:12,color:C.green,marginTop:4}}>Won +{it.payout-it.wager}</div>}
                     <div style={{fontSize:11,color:C.muted,marginTop:4}}>{new Date(it.created_at).toLocaleString()}</div>
                   </Card>
@@ -1114,27 +1339,34 @@ function AppInner(){
               <Btn small bg="#374151" onClick={function(){window.open(API_URL+"/api/pools/"+activePool.id+"/export/bets","_blank");}}>CSV</Btn>
             </div>
             {bets.length===0 && <Card style={{textAlign:"center",color:C.muted,padding:30}}>No bets yet</Card>}
-            {bets.map(function(b,i){
-              var isPend=b.result==="pending";
-              return (
-                <Card key={b.id||i} style={{borderColor:b.result==="win"?C.green+"44":b.result==="loss"?C.red+"44":C.border}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <span style={{fontSize:12,color:C.dim,textTransform:"uppercase",fontWeight:600}}>{b.bet_type}{b.legs?" ("+b.legs.length+" legs)":""}</span>
-                    <Badge text={b.result} color={b.result==="win"?C.green:b.result==="loss"?C.red:b.result==="push"?"#a3a3a3":C.blue}/>
-                  </div>
-                  <div style={{fontWeight:600,fontSize:14,marginTop:6}}>
-                    {b.legs ? b.legs.map(function(l,j){return <div key={j} style={{fontSize:13}}>• {l.gameLabel}: {tm(l.pick).abbr} {l.betType} ({fmtOdds(l.odds)})</div>;}) : <span>{tm(b.pick).abbr||b.pick} {b.line?(b.bet_type==="over"?"O "+b.line:b.bet_type==="under"?"U "+b.line:(b.line>0?"+":"")+b.line):"ML"} ({fmtOdds(b.odds)})</span>}
-                  </div>
-                  <div style={{marginTop:8,padding:"6px 10px",background:C.cardB,borderRadius:6,display:"flex",justifyContent:"space-between",fontSize:12}}>
-                    <div><span style={{color:C.dim}}>Wager: </span><span style={{fontWeight:700}}>{b.wager}</span></div>
-                    {isPend && <div><span style={{color:C.dim}}>To win: </span><span style={{fontWeight:700,color:C.green}}>+{b.potential_profit||calcPayout(b.wager,b.odds)}</span></div>}
-                    {b.result==="win" && <div style={{color:C.green,fontWeight:700}}>+{(b.payout||0)-b.wager}</div>}
-                    {b.result==="loss" && <div style={{color:C.red,fontWeight:700}}>-{b.wager}</div>}
-                    {b.result==="push" && <div style={{color:"#a3a3a3",fontWeight:700}}>Returned</div>}
-                  </div>
-                </Card>
-              );
-            })}
+            {(function(){
+              var grouped=groupBetsByParlay(bets);
+              return grouped.map(function(item,i){
+                if(item.isParlay){
+                  return <ParlayBetCard key={item.parlay_group||i} parlay={item} tm={tm} betDesc={betDesc} allGames={games} showUser={false}/>;
+                }
+                var b=item;
+                var isPend=b.result==="pending";
+                return (
+                  <Card key={b.id||i} style={{borderColor:b.result==="win"?C.green+"44":b.result==="loss"?C.red+"44":C.border}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <span style={{fontSize:12,color:C.dim,textTransform:"uppercase",fontWeight:600}}>{b.bet_type}</span>
+                      <Badge text={b.result} color={b.result==="win"?C.green:b.result==="loss"?C.red:b.result==="push"?"#a3a3a3":C.blue}/>
+                    </div>
+                    <div style={{fontWeight:600,fontSize:14,marginTop:6}}>
+                      <span>{tm(b.pick).abbr||b.pick} {b.line?(b.bet_type==="over"?"O "+b.line:b.bet_type==="under"?"U "+b.line:(b.line>0?"+":"")+b.line):"ML"} ({fmtOdds(b.odds)})</span>
+                    </div>
+                    <div style={{marginTop:8,padding:"6px 10px",background:C.cardB,borderRadius:6,display:"flex",justifyContent:"space-between",fontSize:12}}>
+                      <div><span style={{color:C.dim}}>Wager: </span><span style={{fontWeight:700}}>{b.wager}</span></div>
+                      {isPend && <div><span style={{color:C.dim}}>To win: </span><span style={{fontWeight:700,color:C.green}}>+{b.potential_profit||calcPayout(b.wager,b.odds)}</span></div>}
+                      {b.result==="win" && <div style={{color:C.green,fontWeight:700}}>+{(b.payout||0)-b.wager}</div>}
+                      {b.result==="loss" && <div style={{color:C.red,fontWeight:700}}>-{b.wager}</div>}
+                      {b.result==="push" && <div style={{color:"#a3a3a3",fontWeight:700}}>Returned</div>}
+                    </div>
+                  </Card>
+                );
+              });
+            })()}
           </div>
         )}
 
