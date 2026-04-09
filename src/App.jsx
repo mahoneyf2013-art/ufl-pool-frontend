@@ -168,6 +168,13 @@ function AppInner(){
   const showMsg=function(t,type){setMsg({t:t,type:type||"info"});setTimeout(function(){setMsg(null);},4000);};
   const tm=useTm(espnTeams);
 
+  const[allGamesAdmin,setAllGamesAdmin]=useState([]);
+  const[editingLines,setEditingLines]=useState(null);
+  const[lineForm,setLineForm]=useState({spread_home:"",spread_away:"",total:"",moneyline_home:"",moneyline_away:""});
+  const[oddsDebug,setOddsDebug]=useState(null);
+
+  var loadAdminGames=async function(){try{setAllGamesAdmin(await api("/api/games"));}catch(e){}};
+
   var downloadCSV=function(path){
     var t=getToken();
     var url=API_URL+path+(path.includes("?")?"&":"?")+"token="+encodeURIComponent(t);
@@ -517,7 +524,89 @@ function AppInner(){
             <div style={{display:"flex",gap:8}}><Btn small bg={C.red} onClick={async function(){try{var d=await api("/api/admin/finalize-games",{method:"POST"});showMsg("Finalized "+d.gamesFinalized+" stuck games");await refreshPool();}catch(e){showMsg(e.message,"error");}}}>Fix Stuck Games</Btn><Btn small bg={C.purple} onClick={async function(){try{var d=await api("/api/admin/import-espn-games",{method:"POST"});showMsg("ESPN: "+d.espnImported+" imported, Odds: "+d.oddsRefreshed+" refreshed");setGames(await api("/api/games/upcoming"));}catch(e){showMsg(e.message,"error");}}}>Import ESPN Games</Btn></div>
             <div style={{fontSize:11,color:C.dim}}>Fix Stuck Games: finalizes games that have scores but are stuck as "upcoming". Import ESPN: pulls this week's games from ESPN if Odds API hasn't added them.</div>
           </div></Card>
+
+          <Card style={{borderColor:C.blue+"44"}}>
+            <div style={{fontWeight:700,fontSize:15,marginBottom:4,color:C.blue}}>Set Lines Manually</div>
+            <div style={{fontSize:12,color:C.dim,marginBottom:12}}>Use when the Odds API isn't returning lines for games</div>
+            {allGamesAdmin.length===0?(<Btn small bg={C.blue} onClick={loadAdminGames}>Load Games</Btn>):(
+              <div>
+                {allGamesAdmin.filter(function(g){return g.status==="upcoming";}).length===0&&<div style={{color:C.muted,fontSize:13,padding:10,textAlign:"center"}}>No upcoming games. Hit "Import ESPN Games" first.</div>}
+                {allGamesAdmin.filter(function(g){return g.status==="upcoming";}).map(function(g){
+                  var aw=tm(g.away_team),hm=tm(g.home_team);
+                  var isEditing=editingLines===g.id;
+                  var hasLines=g.spread_home!=null||g.moneyline_home!=null;
+                  return(<div key={g.id} style={{padding:"10px 12px",background:C.cardB,borderRadius:8,marginBottom:6}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div>
+                        <div style={{fontWeight:700,fontSize:14}}>{aw.abbr} @ {hm.abbr}</div>
+                        <div style={{fontSize:11,color:C.dim}}>{new Date(g.commence_time).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})} • {new Date(g.commence_time).toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"})}</div>
+                        {hasLines&&<div style={{fontSize:11,color:C.green,marginTop:2}}>Spd: {g.spread_home!=null?(g.spread_home>0?"+":"")+g.spread_home:"—"} | O/U: {g.total||"—"} | ML: {g.moneyline_home||"—"}/{g.moneyline_away||"—"}</div>}
+                        {!hasLines&&<div style={{fontSize:11,color:C.red,marginTop:2}}>No lines set</div>}
+                      </div>
+                      <Btn small bg={isEditing?"#374151":C.blue} onClick={function(){
+                        if(isEditing){setEditingLines(null);}
+                        else{setEditingLines(g.id);setLineForm({spread_home:g.spread_home!=null?String(g.spread_home):"",spread_away:g.spread_away!=null?String(g.spread_away):"",total:g.total!=null?String(g.total):"",moneyline_home:g.moneyline_home!=null?String(g.moneyline_home):"",moneyline_away:g.moneyline_away!=null?String(g.moneyline_away):""});}
+                      }}>{isEditing?"Cancel":"Edit"}</Btn>
+                    </div>
+                    {isEditing&&(<div style={{marginTop:10}}>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:8}}>
+                        <div><label style={{fontSize:10,color:C.dim}}>Spread ({hm.abbr})</label><Input type="number" step="0.5" value={lineForm.spread_home} onChange={function(e){var v=e.target.value;setLineForm({...lineForm,spread_home:v,spread_away:v?String(-parseFloat(v)):""});}} style={{padding:"6px 8px",fontSize:12}}/></div>
+                        <div><label style={{fontSize:10,color:C.dim}}>Spread ({aw.abbr})</label><Input type="number" step="0.5" value={lineForm.spread_away} onChange={function(e){var v=e.target.value;setLineForm({...lineForm,spread_away:v,spread_home:v?String(-parseFloat(v)):""});}} style={{padding:"6px 8px",fontSize:12}}/></div>
+                        <div><label style={{fontSize:10,color:C.dim}}>Total (O/U)</label><Input type="number" step="0.5" value={lineForm.total} onChange={function(e){setLineForm({...lineForm,total:e.target.value});}} style={{padding:"6px 8px",fontSize:12}}/></div>
+                        <div></div>
+                        <div><label style={{fontSize:10,color:C.dim}}>ML ({hm.abbr})</label><Input type="number" value={lineForm.moneyline_home} onChange={function(e){setLineForm({...lineForm,moneyline_home:e.target.value});}} style={{padding:"6px 8px",fontSize:12}}/></div>
+                        <div><label style={{fontSize:10,color:C.dim}}>ML ({aw.abbr})</label><Input type="number" value={lineForm.moneyline_away} onChange={function(e){setLineForm({...lineForm,moneyline_away:e.target.value});}} style={{padding:"6px 8px",fontSize:12}}/></div>
+                      </div>
+                      <Btn full bg={C.green} onClick={async function(){
+                        try{
+                          var body={game_id:g.id};
+                          if(lineForm.spread_home)body.spread_home=parseFloat(lineForm.spread_home);
+                          if(lineForm.spread_away)body.spread_away=parseFloat(lineForm.spread_away);
+                          if(lineForm.total)body.total=parseFloat(lineForm.total);
+                          if(lineForm.moneyline_home)body.moneyline_home=parseInt(lineForm.moneyline_home);
+                          if(lineForm.moneyline_away)body.moneyline_away=parseInt(lineForm.moneyline_away);
+                          await api("/api/admin/set-lines",{method:"POST",body:JSON.stringify(body)});
+                          showMsg("Lines saved!");setEditingLines(null);
+                          loadAdminGames();
+                          setGames(await api("/api/games/upcoming"));
+                        }catch(e){showMsg(e.message,"error");}
+                      }}>Save Lines</Btn>
+                    </div>)}
+                  </div>);
+                })}
+                <div style={{marginTop:8}}><Btn small bg="#374151" onClick={loadAdminGames}>Refresh List</Btn></div>
+              </div>
+            )}
+          </Card>
           <Card><div style={{fontWeight:700,fontSize:15,marginBottom:10}}>Settings</div><div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",borderBottom:"1px solid "+C.border}}><span style={{fontSize:13}}>Join Code</span><span style={{fontWeight:700,letterSpacing:2}}>{activePool?.join_code}</span></div><div style={{display:"flex",justifyContent:"space-between",padding:"8px 0"}}><span style={{fontSize:13}}>Starting Balance</span><span style={{fontWeight:600}}>{activePool?.starting_balance||1000} pts</span></div></Card>
+          <Card style={{borderColor:"#64748b44"}}>
+            <div style={{fontWeight:700,fontSize:15,marginBottom:4,color:"#64748b"}}>Odds API Diagnostics</div>
+            <div style={{fontSize:12,color:C.dim,marginBottom:10}}>Check why lines aren't loading</div>
+            <Btn small bg="#64748b" onClick={async function(){try{setOddsDebug(null);var d=await api("/api/admin/odds-debug");setOddsDebug(d);}catch(e){showMsg(e.message,"error");}}}>Run Diagnostics</Btn>
+            {oddsDebug&&(<div style={{marginTop:12,fontSize:12}}>
+              <div style={{padding:8,background:C.cardB,borderRadius:6,marginBottom:6}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{color:C.dim}}>Current sport key:</span><span style={{fontWeight:700,fontFamily:"monospace"}}>{oddsDebug.currentSportKey}</span></div>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{color:C.dim}}>API status:</span><span style={{fontWeight:700,color:oddsDebug.currentKeyStatus===200?C.green:C.red}}>{oddsDebug.currentKeyStatus}</span></div>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{color:C.dim}}>Games returned:</span><span style={{fontWeight:700,color:oddsDebug.currentKeyGames>0?C.green:C.red}}>{oddsDebug.currentKeyGames}</span></div>
+                {oddsDebug.currentKeyError&&<div style={{color:C.red,marginTop:4}}>Error: {oddsDebug.currentKeyError}</div>}
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{color:C.dim}}>API quota remaining:</span><span style={{fontWeight:700}}>{oddsDebug.apiQuota?.remaining||"?"}</span></div>
+                <div style={{display:"flex",justifyContent:"space-between"}}><span style={{color:C.dim}}>API quota used:</span><span>{oddsDebug.apiQuota?.used||"?"}</span></div>
+              </div>
+              {oddsDebug.allFootballSports?.length>0&&(<div style={{padding:8,background:C.cardB,borderRadius:6,marginBottom:6}}>
+                <div style={{fontWeight:700,color:C.amber,marginBottom:4}}>Football sports found ({oddsDebug.allFootballSports.length}):</div>
+                {oddsDebug.allFootballSports.map(function(s,i){return <div key={i} style={{padding:"3px 0",borderBottom:i<oddsDebug.allFootballSports.length-1?"1px solid "+C.border:"none"}}><span style={{fontFamily:"monospace",color:C.green,fontWeight:700}}>{s.key}</span><span style={{color:C.dim}}> — {s.title} ({s.group}) {s.active?"✅":"❌ inactive"}</span></div>;})}
+              </div>)}
+              {Object.keys(oddsDebug.alternateKeyResults||{}).length>0&&(<div style={{padding:8,background:C.cardB,borderRadius:6,marginBottom:6}}>
+                <div style={{fontWeight:700,color:C.blue,marginBottom:4}}>Alternate key results:</div>
+                {Object.entries(oddsDebug.alternateKeyResults).map(function(entry,i){return <div key={i} style={{padding:"2px 0"}}><span style={{fontFamily:"monospace"}}>{entry[0]}</span>: <span style={{color:entry[1].count>0?C.green:C.dim}}>{entry[1].count} games (HTTP {entry[1].status})</span></div>;})}
+              </div>)}
+              <div style={{padding:8,background:C.cardB,borderRadius:6}}>
+                <div style={{fontWeight:700,color:C.dim,marginBottom:4}}>All sports ({oddsDebug.allSportsCount}):</div>
+                <div style={{maxHeight:200,overflowY:"auto"}}>{(oddsDebug.allSports||[]).map(function(s,i){return <div key={i} style={{padding:"2px 0",fontSize:11,color:s.active?C.text:C.muted}}><span style={{fontFamily:"monospace"}}>{s.key}</span> — {s.title}</div>;})}</div>
+              </div>
+            </div>)}
+          </Card>
+
           <Card style={{borderColor:C.green+"44"}}><div style={{fontWeight:700,fontSize:15,marginBottom:4,color:C.green}}>Export Data</div><div style={{fontSize:12,color:C.dim,marginBottom:12}}>Download spreadsheets for record keeping and balance correction</div><div style={{display:"flex",flexDirection:"column",gap:8}}><Btn full bg={C.green} onClick={function(){downloadCSV("/api/pools/"+activePool.id+"/export/all-activity");}}>Download All Bet Activity (Admin)</Btn><div style={{fontSize:11,color:C.dim,padding:"0 4px"}}>Every bet by every member, parlay groupings, game results, and a member summary with expected vs actual balances.</div><div style={{display:"flex",gap:8}}><Btn full bg="#374151" onClick={function(){downloadCSV("/api/pools/"+activePool.id+"/export/standings");}}>Standings CSV</Btn><Btn full bg="#374151" onClick={function(){downloadCSV("/api/pools/"+activePool.id+"/export/bets");}}>My Bets CSV</Btn></div></div></Card>
         </div>)}
       </div>
